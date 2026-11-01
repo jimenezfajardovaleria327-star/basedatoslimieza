@@ -1,0 +1,269 @@
+# ============================================================
+# NORMALIZACIÓN DENUE INEGI a 3FN
+# ============================================================
+
+# Ruta real del CSV
+archivo = "/home/val/Documentos/vale221/practica1.py/__pycache__/base-datos/denue_sucia.csv"
+
+# -----------------------------------------------------------
+# 1) Cargar
+# -----------------------------------------------------------
+df = pd.read_csv(archivo, encoding="latin1", dtype=str)
+
+# -----------------------------------------------------------
+# 2) Normalizar nombres de columnas
+# -----------------------------------------------------------
+df.columns = df.columns.astype(str).str.strip()
+df.columns = [re.sub(r"\s+", "_", c).lower() for c in df.columns]
+df.columns = [c.replace("á","a").replace("é","e").replace("í","i").replace("ó","o").replace("ú","u").replace("ñ","n") for c in df.columns]
+df.columns = [c.replace("(","").replace(")","").replace("/","_").replace("-","_") for c in df.columns]
+df.columns = [re.sub(r"__+", "_", c) for c in df.columns]
+
+print("Columnas cargadas:")
+print(df.columns.tolist()[:20])
+print("Existe clave_municipio:", "clave_municipio" in df.columns)
+
+# -----------------------------------------------------------
+# 3) Limpiar valores vacío
+# -----------------------------------------------------------
+for c in df.columns:
+    df[c] = df[c].replace({np.nan: "", "nan": "", "None": "", "none": ""})
+    df[c] = df[c].astype(str).str.strip()
+
+# -----------------------------------------------------------
+# 4) Renombrar columnas importantes
+# -----------------------------------------------------------
+rename_map = {
+    "id": "id_original",
+    "clee": "clee",
+    "nombre_de_la_unidad_economica": "nombre_unidad",
+    "razon_social": "razon_social",
+    "codigo_de_la_clase_de_actividad_scian": "codigo_scian",
+    "nombre_de_clase_de_la_actividad": "nombre_clase",
+    "descripcion_estrato_personal_ocupado": "descripcion_estrato",
+    "tipo_de_vialidad": "tipo_vialidad",
+    "nombre_de_la_vialidad": "nombre_vialidad",
+    "tipo_de_entre_vialidad_1": "tipo_entre_vialidad_1",
+    "nombre_de_entre_vialidad_1": "nombre_entre_vialidad_1",
+    "tipo_de_entre_vialidad_2": "tipo_entre_vialidad_2",
+    "nombre_de_entre_vialidad_2": "nombre_entre_vialidad_2",
+    "tipo_de_entre_vialidad_3": "tipo_entre_vialidad_3",
+    "nombre_de_entre_vialidad_3": "nombre_entre_vialidad_3",
+    "numero_exterior_o_kilometro": "numero_exterior",
+    "letra_exterior": "letra_exterior",
+    "edificio": "edificio",
+    "edificio_piso": "edificio_piso",
+    "numero_interior": "numero_interior",
+    "letra_interior": "letra_interior",
+    "tipo_de_asentamiento_humano": "tipo_asentamiento",
+    "nombre_de_asentamiento_humano": "nombre_asentamiento",
+    "tipo_centro_comercial": "tipo_centro_comercial",
+    "corredor_industrial_centro_comercial_o_mercado_publico": "corredor_industrial",
+    "numero_de_local": "numero_local",
+    "codigo_postal": "codigo_postal",
+    "clave_entidad": "clave_entidad",
+    "entidad_federativa": "entidad_federativa",
+    "clave_municipio": "clave_municipio",
+    "municipio": "municipio",
+    "clave_localidad": "clave_localidad",
+    "localidad": "localidad",
+    "area_geoestadistica_basica": "area_geoestadistica",
+    "manzana": "manzana",
+    "numero_de_telefono": "numero_telefono",
+    "correo_electronico": "correo_electronico",
+    "sitio_en_internet": "sitio_web",
+    "tipo_de_establecimiento": "tipo_establecimiento",
+    "latitud": "latitud",
+    "longitud": "longitud",
+    "fecha_de_incorporacion_al_denue": "fecha_incorporacion_al_denue"
+}
+
+df = df.rename(columns=rename_map)
+
+# -----------------------------------------------------------
+# 5) Crear id_unidad
+# -----------------------------------------------------------
+df["id_original"] = df["id_original"].astype(str)
+df["id_unidad"] = pd.to_numeric(df["id_original"], errors="coerce")
+mask = df["id_unidad"].isna()
+if mask.any():
+    start = 1
+    if df["id_unidad"].notna().any():
+        start = int(df["id_unidad"].max()) + 1
+    df.loc[mask, "id_unidad"] = np.arange(start, start + mask.sum())
+df["id_unidad"] = df["id_unidad"].astype(int)
+
+# -----------------------------------------------------------
+# 6) 1FN: separar nombre y apellido del propietario
+# -----------------------------------------------------------
+def es_empresa(x):
+    x = str(x).strip()
+    if x == "":
+        return True
+    xup = x.upper()
+    if any(k in xup for k in ["S.A.", "SA", "S DE RL", "LTDA", "SOCIEDAD", "INDUSTRIAL", "COMERCIAL", "SERVICIOS", "GROUP", "CORP"]):
+        return True
+    partes = x.split()
+    if len(partes) >= 3:
+        return True
+    return False
+
+def separar_nombre_apellido(x):
+    x = str(x).strip()
+    if x == "":
+        return "", ""
+    if es_empresa(x):
+        return x, ""
+    partes = x.split()
+    if len(partes) >= 2:
+        return partes[0], " ".join(partes[1:])
+    return x, ""
+
+# Usamos razon_social si trae nombre personal y si está vacío usa nombre_unidad
+df["propietario_raw"] = df["razon_social"].fillna("")
+df["propietario_raw"] = np.where(df["propietario_raw"].str.strip() == "", df["nombre_unidad"], df["propietario_raw"])
+propietario = df[["propietario_raw"]].drop_duplicates().reset_index(drop=True)
+propietario[["nombre_propietario", "apellido_propietario"]] = propietario["propietario_raw"].apply(
+    lambda x: pd.Series(separar_nombre_apellido(x))
+)
+propietario.insert(0, "id_propietario", range(1, len(propietario) + 1))
+propietario = propietario.drop(columns=["propietario_raw"])
+print("\nPropietarios separados:")
+print(propietario.head())
+
+# -----------------------------------------------------------
+# 7) 1FN: separar teléfonos, correos y sitios web en filas distintas
+# -----------------------------------------------------------
+def split_multi_values(valor):
+    if valor is None:
+        return []
+    v = str(valor).strip()
+    if v == "" or v.lower() in ["nan", "none"]:
+        return []
+    valores = [p.strip() for p in v.split(",")]
+    valores = [p for p in valores if p not in ["", "nan", "none", "None"]]
+    return valores
+
+contactos = []
+for _, row in df.iterrows():
+    id_unidad = row["id_unidad"]
+    for tel in split_multi_values(row.get("numero_telefono", "")):
+        contactos.append({"id_unidad": id_unidad, "telefono": tel, "correo": "", "sitio_web": ""})
+    for mail in split_multi_values(row.get("correo_electronico", "")):
+        contactos.append({"id_unidad": id_unidad, "telefono": "", "correo": mail, "sitio_web": ""})
+    for web in split_multi_values(row.get("sitio_web", "")):
+        contactos.append({"id_unidad": id_unidad, "telefono": "", "correo": "", "sitio_web": web})
+
+detalle_contacto = pd.DataFrame(contactos)
+if not detalle_contacto.empty:
+    detalle_contacto = detalle_contacto.drop_duplicates().reset_index(drop=True)
+    detalle_contacto.insert(0, "id_contacto", range(1, len(detalle_contacto) + 1))
+else:
+    detalle_contacto = pd.DataFrame(columns=["id_contacto", "id_unidad", "telefono", "correo", "sitio_web"])
+
+print("\nDetalle contacto:")
+print(detalle_contacto.head())
+
+# -----------------------------------------------------------
+# 8) 2FN: catálogos sin repetir
+# -----------------------------------------------------------
+cat_entidad = df[["clave_entidad", "entidad_federativa"]].drop_duplicates().reset_index(drop=True)
+cat_municipio = df[["clave_municipio", "municipio", "clave_entidad"]].drop_duplicates().reset_index(drop=True)
+cat_localidad = df[["clave_localidad", "localidad", "clave_municipio"]].drop_duplicates().reset_index(drop=True)
+cat_scian = df[["codigo_scian", "nombre_clase"]].drop_duplicates().reset_index(drop=True)
+cat_estrato = df[["descripcion_estrato"]].drop_duplicates().reset_index(drop=True)
+cat_estrato.insert(0, "id_estrato", range(1, len(cat_estrato)+1))
+
+cat_asentamiento = df[["tipo_asentamiento", "nombre_asentamiento", "codigo_postal"]].drop_duplicates().reset_index(drop=True)
+cat_asentamiento.insert(0, "id_asentamiento", range(1, len(cat_asentamiento)+1))
+
+print("\nCatalogos creados:")
+print("cat_entidad:", len(cat_entidad))
+print("cat_municipio:", len(cat_municipio))
+print("cat_localidad:", len(cat_localidad))
+print("cat_scian:", len(cat_scian))
+print("cat_estrato:", len(cat_estrato))
+print("cat_asentamiento:", len(cat_asentamiento))
+
+# -----------------------------------------------------------
+# 9) 3FN: tabla unidad_economica y muchas relaciones
+# -----------------------------------------------------------
+# Mapeo de fk
+df = df.merge(cat_entidad, on=["clave_entidad", "entidad_federativa"], how="left")
+df = df.merge(cat_municipio, on=["clave_municipio", "municipio", "clave_entidad"], how="left")
+df = df.merge(cat_localidad, on=["clave_localidad", "localidad", "clave_municipio"], how="left")
+df = df.merge(cat_scian, on=["codigo_scian", "nombre_clase"], how="left")
+df = df.merge(cat_estrato, on="descripcion_estrato", how="left")
+df = df.merge(cat_asentamiento, on=["tipo_asentamiento", "nombre_asentamiento", "codigo_postal"], how="left")
+
+# Agregar id_propietario
+# Unir por propietario_raw exacto -> nombre_propietario si es persona, o razon social/nombre_unidad
+df["propietario_join"] = df["propietario_raw"]
+propietario_join = propietario[["nombre_propietario", "apellido_propietario", "id_propietario"]].copy()
+# merge simple sobre nombre_propietario
+df = df.merge(propietario_join, left_on="propietario_raw", right_on="nombre_propietario", how="left")
+
+# Tabla principal
+unidad_economica = df[[
+    "id_unidad",
+    "clee",
+    "nombre_unidad",
+    "id_propietario",
+    "codigo_scian",
+    "id_estrato",
+    "id_asentamiento",
+    "clave_localidad",
+    "latitud",
+    "longitud",
+    "tipo_establecimiento",
+    "fecha_incorporacion_al_denue"
+]].copy()
+unidad_economica = unidad_economica.drop_duplicates().reset_index(drop=True)
+print("\nunidad_economica:")
+print(unidad_economica.head())
+
+# detalle_unidad_vialidad: muchos a muchos
+detalle_rows = []
+for _, row in df.iterrows():
+    id_unidad = row["id_unidad"]
+    for t, n in [
+        ("tipo_entre_vialidad_1", "nombre_entre_vialidad_1"),
+        ("tipo_entre_vialidad_2", "nombre_entre_vialidad_2"),
+        ("tipo_entre_vialidad_3", "nombre_entre_vialidad_3"),
+    ]:
+        tipo = str(row.get(t, "")).strip()
+        nombre = str(row.get(n, "")).strip()
+        if tipo or nombre:
+            detalle_rows.append({
+                "id_unidad": id_unidad,
+                "tipo_entre_vialidad": tipo,
+                "nombre_entre_vialidad": nombre
+            })
+
+detalle_unidad_vialidad = pd.DataFrame(detalle_rows)
+if not detalle_unidad_vialidad.empty:
+    detalle_unidad_vialidad = detalle_unidad_vialidad.drop_duplicates().reset_index(drop=True)
+    detalle_unidad_vialidad.insert(0, "id_detalle", range(1, len(detalle_unidad_vialidad)+1))
+else:
+    detalle_unidad_vialidad = pd.DataFrame(columns=["id_detalle", "id_unidad", "tipo_entre_vialidad", "nombre_entre_vialidad"])
+
+print("\ndetalle_unidad_vialidad:")
+print(detalle_unidad_vialidad.head())
+
+# -----------------------------------------------------------
+# 10) Guardar CSVs
+# -----------------------------------------------------------
+os.makedirs("/home/val/Documentos/vale221/practica1.py/__pycache__/base-datos/denue_normalizado", exist_ok=True)
+
+cat_entidad.to_csv("/home/val/Documentos/vale221/practica1.py/__pycache__/base-datos/denue_normalizado/cat_entidad.csv", index=False, encoding="latin1")
+cat_municipio.to_csv("/home/val/Documentos/vale221/practica1.py/__pycache__/base-datos/denue_normalizado/cat_municipio.csv", index=False, encoding="latin1")
+cat_localidad.to_csv("/home/val/Documentos/vale221/practica1.py/__pycache__/base-datos/denue_normalizado/cat_localidad.csv", index=False, encoding="latin1")
+cat_scian.to_csv("/home/val/Documentos/vale221/practica1.py/__pycache__/base-datos/denue_normalizado/cat_scian.csv", index=False, encoding="latin1")
+cat_estrato.to_csv("/home/val/Documentos/vale221/practica1.py/__pycache__/base-datos/denue_normalizado/cat_estrato.csv", index=False, encoding="latin1")
+cat_asentamiento.to_csv("/home/val/Documentos/vale221/practica1.py/__pycache__/base-datos/denue_normalizado/cat_asentamiento.csv", index=False, encoding="latin1")
+propietario.to_csv("/home/val/Documentos/vale221/practica1.py/__pycache__/base-datos/denue_normalizado/cat_propietario.csv", index=False, encoding="latin1")
+unidad_economica.to_csv("/home/val/Documentos/vale221/practica1.py/__pycache__/base-datos/denue_normalizado/unidad_economica.csv", index=False, encoding="latin1")
+detalle_unidad_vialidad.to_csv("/home/val/Documentos/vale221/practica1.py/__pycache__/base-datos/denue_normalizado/detalle_unidad_vialidad.csv", index=False, encoding="latin1")
+detalle_contacto.to_csv("/home/val/Documentos/vale221/practica1.py/__pycache__/base-datos/denue_normalizado/detalle_contacto.csv", index=False, encoding="latin1")
+
+print("\n✅ Archivos generados en: /home/val/Documentos/vale221/practica1.py/__pycache__/base-datos/denue_normalizado")
